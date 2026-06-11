@@ -106,6 +106,7 @@ mod settings_file_footer;
 pub(crate) mod settings_page;
 mod show_blocks_view;
 mod ssh_hosts;
+mod ssh_hosts_metadata_edit_dialog;
 mod tab_menu;
 mod teams_page;
 mod telemetry;
@@ -1244,7 +1245,8 @@ impl SettingsView {
             me.handle_mcp_servers_page_event(event, ctx);
         });
 
-        let ssh_hosts_page_handle = ctx.add_view(ssh_hosts::SshHostsSettingsPageView::new);
+        let ssh_hosts_page_handle =
+            ctx.add_typed_action_view(ssh_hosts::SshHostsSettingsPageView::new);
 
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let search_editor = ctx.add_typed_action_view(|ctx| {
@@ -2327,6 +2329,9 @@ impl SettingsView {
                 view.read(app, |view, _| view.get_modal_content(app))
             }
             SettingsPageViewHandle::AI(view) => {
+                view.read(app, |view, _| view.get_modal_content(app))
+            }
+            SettingsPageViewHandle::SshHosts(view) => {
                 view.read(app, |view, _| view.get_modal_content(app))
             }
             _ => None,

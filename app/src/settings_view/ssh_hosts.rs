@@ -6,24 +6,35 @@
 //! Each entry shows the alias plus the resolved connect-time metadata
 //! ssh would use (hostname, user, port, identity files, ProxyJump).
 //!
-//! Rows are click-to-connect (Phase 1.4): a click opens a fresh
-//! terminal tab and submits `ssh <alias>` in one go. The page
-//! live-refreshes via the model's `HostsUpdated` event whenever the
-//! parsed config changes on disk.
+//! - Phase 1.4 (click-to-connect): a click on the main row surface
+//!   opens a fresh terminal tab and submits `ssh <alias>` in one go.
+//! - Phase 1.5a (metadata display): when [`crate::ssh_hosts_metadata::SshHostsMetadataModel`]
+//!   has a record for an alias, the row shows the display-name
+//!   override, color swatch, tag chips, and notes.
+//! - Phase 1.5b (metadata editor): each row carries an "Edit" button;
+//!   clicking it opens [`super::ssh_hosts_metadata_edit_dialog::SshHostsMetadataEditDialog`],
+//!   which writes back through the model on Save.
+//!
+//! The page live-refreshes via the model's `HostsUpdated` and
+//! `Updated` events whenever the underlying state changes on disk.
 
 use warp_core::ui::color::hex_color::coloru_from_hex_string;
 use warp_ssh_config::HostDetail;
 use warpui::elements::{
-    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Element, Flex, Hoverable,
-    MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius, Wrap,
+    Border, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Element, Flex,
+    Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius,
+    Wrap,
 };
 use warpui::platform::Cursor;
 use warpui::ui_components::components::UiComponent;
-use warpui::{AppContext, Entity, SingletonEntity, View, ViewContext, ViewHandle};
+use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle};
 
 use super::settings_page::{
     MatchData, PageType, SettingsPageEvent, SettingsPageMeta, SettingsPageViewHandle,
     SettingsWidget,
+};
+use super::ssh_hosts_metadata_edit_dialog::{
+    SshHostsMetadataEditDialog, SshHostsMetadataEditDialogEvent,
 };
 use super::SettingsSection;
 use crate::appearance::Appearance;
@@ -40,6 +51,19 @@ const CHIP_SPACING: f32 = 4.;
 const CHIP_HORIZONTAL_PADDING: f32 = 6.;
 const CHIP_VERTICAL_PADDING: f32 = 2.;
 const CHIP_ROW_TOP_MARGIN: f32 = 6.;
+const EDIT_BUTTON_PADDING: f32 = 6.;
+
+/// Page-level actions routed via [`TypedActionView`]. Edit buttons in
+/// each host row dispatch [`SshHostsSettingsPageAction::OpenMetadataEditor`]
+/// rather than mutating page state directly, because per-row click
+/// closures only have access to an `EventContext` (no direct view
+/// state access).
+#[derive(Debug, Clone)]
+pub enum SshHostsSettingsPageAction {
+    /// Open the metadata edit dialog for the given alias, pre-filled
+    /// with the current record (or empty fields when no record exists).
+    OpenMetadataEditor(String),
+}
 
 pub struct SshHostsSettingsPageView {
     page: PageType<Self>,
@@ -47,16 +71,23 @@ pub struct SshHostsSettingsPageView {
     /// host list snapshot held by [`SshHostsModel`]. Kept in sync with
     /// the host list via the model subscription.
     row_states: Vec<MouseStateHandle>,
+    /// Per-row edit-button mouse states. Same indexing as `row_states`.
+    edit_button_states: Vec<MouseStateHandle>,
+    /// The metadata edit dialog, rendered into the modal slot when
+    /// [`SshHostsMetadataEditDialog::is_visible`] is true.
+    metadata_edit_dialog: ViewHandle<SshHostsMetadataEditDialog>,
 }
 
 impl SshHostsSettingsPageView {
     pub fn new(ctx: &mut ViewContext<SshHostsSettingsPageView>) -> Self {
         // Re-render when the parsed host list changes on disk, and
-        // resize the per-row handle vector to match.
+        // resize the per-row handle vectors to match.
         let model = SshHostsModel::handle(ctx);
         ctx.subscribe_to_model(&model, |me, _, event, ctx| match event {
             SshHostsEvent::HostsUpdated(new_hosts) => {
                 me.row_states
+                    .resize_with(new_hosts.len(), MouseStateHandle::default);
+                me.edit_button_states
                     .resize_with(new_hosts.len(), MouseStateHandle::default);
                 ctx.notify();
             }
@@ -72,12 +103,69 @@ impl SshHostsSettingsPageView {
             }
         });
 
+        let metadata_edit_dialog = ctx.add_typed_action_view(SshHostsMetadataEditDialog::new);
+        ctx.subscribe_to_view(&metadata_edit_dialog, |me, _, event, ctx| {
+            me.handle_metadata_edit_dialog_event(event, ctx);
+        });
+
         let initial_count = SshHostsModel::as_ref(ctx).hosts().len();
         let row_states = (0..initial_count).map(|_| Default::default()).collect();
+        let edit_button_states = (0..initial_count).map(|_| Default::default()).collect();
 
         Self {
             page: PageType::new_monolith(SshHostsWidget, Some("SSH hosts"), false),
             row_states,
+            edit_button_states,
+            metadata_edit_dialog,
+        }
+    }
+
+    fn handle_metadata_edit_dialog_event(
+        &mut self,
+        event: &SshHostsMetadataEditDialogEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let dialog = self.metadata_edit_dialog.clone();
+        match event {
+            SshHostsMetadataEditDialogEvent::Save { alias, metadata } => {
+                let alias = alias.clone();
+                let metadata = metadata.clone();
+                SshHostsMetadataModel::handle(ctx).update(ctx, move |model, ctx| {
+                    model.set(alias, metadata, ctx);
+                });
+                dialog.update(ctx, |d, ctx| d.hide(ctx));
+            }
+            SshHostsMetadataEditDialogEvent::Cancel => {
+                dialog.update(ctx, |d, ctx| d.hide(ctx));
+            }
+        }
+    }
+
+    /// Returns the dialog element when it's open. Wired through
+    /// `settings_view::mod.rs::get_modal_content_for_page` so the
+    /// Settings shell renders it as a top-level overlay.
+    pub fn get_modal_content(&self, app: &AppContext) -> Option<Box<dyn Element>> {
+        if self.metadata_edit_dialog.as_ref(app).is_visible() {
+            Some(ChildView::new(&self.metadata_edit_dialog).finish())
+        } else {
+            None
+        }
+    }
+}
+
+impl TypedActionView for SshHostsSettingsPageView {
+    type Action = SshHostsSettingsPageAction;
+
+    fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
+        match action {
+            SshHostsSettingsPageAction::OpenMetadataEditor(alias) => {
+                let alias = alias.clone();
+                let current = SshHostsMetadataModel::as_ref(ctx).get(&alias).cloned();
+                let dialog = self.metadata_edit_dialog.clone();
+                dialog.update(ctx, move |d, ctx| {
+                    d.show(alias, current.as_ref(), ctx);
+                });
+            }
         }
     }
 }
@@ -127,8 +215,19 @@ impl SettingsWidget for SshHostsWidget {
                 // out of sync with the host list (the resize fires on
                 // the next `HostsUpdated` after a config edit).
                 let mouse_state = view.row_states.get(idx).cloned().unwrap_or_default();
+                let edit_state = view
+                    .edit_button_states
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_default();
                 let row_metadata = metadata.get(&host.alias);
-                column.add_child(render_host_row(host, row_metadata, mouse_state, appearance));
+                column.add_child(render_host_row(
+                    host,
+                    row_metadata,
+                    mouse_state,
+                    edit_state,
+                    appearance,
+                ));
             }
         }
 
@@ -197,12 +296,15 @@ fn render_host_row(
     host: &HostDetail,
     metadata: Option<&HostMetadata>,
     mouse_state: MouseStateHandle,
+    edit_state: MouseStateHandle,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
-    // Captured by the click handler — needs to outlive the closure body.
+    // Captured by the connect click handler.
     let alias_for_dispatch = host.alias.clone();
+    // Captured by the edit click handler.
+    let alias_for_edit = host.alias.clone();
 
-    Hoverable::new(mouse_state, |_state| {
+    let connect_surface = Hoverable::new(mouse_state, |_state| {
         let ui = appearance.ui_builder();
 
         // Title row: optional color swatch + display name (falls back
@@ -278,7 +380,6 @@ fn render_host_row(
         Container::new(row.finish())
             .with_padding_top(ROW_PADDING)
             .with_padding_bottom(ROW_PADDING)
-            .with_margin_bottom(ROW_SPACING - ROW_PADDING)
             .finish()
     })
     .with_cursor(Cursor::PointingHand)
@@ -294,6 +395,54 @@ fn render_host_row(
         ctx.dispatch_typed_action(WorkspaceAction::RunCommand(format!(
             "ssh {alias_for_dispatch}"
         )));
+    })
+    .finish();
+
+    let edit_button = render_edit_button(alias_for_edit, edit_state, appearance);
+
+    Container::new(
+        Flex::row()
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(connect_surface)
+            .with_child(edit_button)
+            .finish(),
+    )
+    .with_margin_bottom(ROW_SPACING - ROW_PADDING)
+    .finish()
+}
+
+/// "Edit" button rendered next to each host row. Dispatches a
+/// page-level [`SshHostsSettingsPageAction::OpenMetadataEditor`]
+/// rather than touching the dialog directly, because the click
+/// closure only has `EventContext` (no view state).
+fn render_edit_button(
+    alias: String,
+    mouse_state: MouseStateHandle,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let outline = theme.outline();
+    let surface_2 = theme.surface_2();
+    Hoverable::new(mouse_state, |_state| {
+        Container::new(
+            appearance
+                .ui_builder()
+                .span("Edit".to_string())
+                .build()
+                .finish(),
+        )
+        .with_padding(Padding::uniform(EDIT_BUTTON_PADDING))
+        .with_background(surface_2)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_border(Border::all(1.).with_border_fill(outline))
+        .finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(SshHostsSettingsPageAction::OpenMetadataEditor(
+            alias.clone(),
+        ));
     })
     .finish()
 }
