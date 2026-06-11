@@ -105,6 +105,7 @@ mod scripting_page;
 mod settings_file_footer;
 pub(crate) mod settings_page;
 mod show_blocks_view;
+mod ssh_hosts;
 mod tab_menu;
 mod teams_page;
 mod telemetry;
@@ -250,6 +251,7 @@ pub enum SettingsSection {
     Referrals,
     Scripting,
     SharedBlocks,
+    SshHosts,
     Teams,
     WarpDrive,
     Warpify,
@@ -289,6 +291,7 @@ impl Display for SettingsSection {
             SettingsSection::SharedBlocks => write!(f, "Shared blocks"),
             SettingsSection::MCPServers => write!(f, "MCP Servers"),
             SettingsSection::Scripting => write!(f, "Scripting"),
+            SettingsSection::SshHosts => write!(f, "SSH hosts"),
             SettingsSection::WarpDrive => write!(f, "Warp Drive"),
             SettingsSection::WarpAgent => write!(f, "Warp Agent"),
             SettingsSection::AgentProfiles => write!(f, "Profiles"),
@@ -1074,6 +1077,7 @@ macro_rules! update_page {
             SettingsPageViewHandle::Code(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::BillingAndUsage(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::MCPServers(handle) => $ctx.update_view(handle, $update),
+            SettingsPageViewHandle::SshHosts(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::WarpDrive(handle) => $ctx.update_view(handle, $update),
         }
     };
@@ -1240,6 +1244,8 @@ impl SettingsView {
             me.handle_mcp_servers_page_event(event, ctx);
         });
 
+        let ssh_hosts_page_handle = ctx.add_view(ssh_hosts::SshHostsSettingsPageView::new);
+
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let search_editor = ctx.add_typed_action_view(|ctx| {
             let options = SingleLineEditorOptions {
@@ -1290,6 +1296,7 @@ impl SettingsView {
 
         settings_pages.extend(vec![
             SettingsPage::new(mcp_servers_page_handle),
+            SettingsPage::new(ssh_hosts_page_handle),
             SettingsPage::new(environments_page_handle.clone()),
             SettingsPage::new(privacy_page_handle),
             SettingsPage::new(about_page_handle),
@@ -1325,6 +1332,7 @@ impl SettingsView {
             SettingsNavItem::Page(SettingsSection::Warpify),
             SettingsNavItem::Page(SettingsSection::Referrals),
             SettingsNavItem::Page(SettingsSection::SharedBlocks),
+            SettingsNavItem::Page(SettingsSection::SshHosts),
             SettingsNavItem::Page(SettingsSection::WarpDrive),
             SettingsNavItem::Page(SettingsSection::Privacy),
             SettingsNavItem::Page(SettingsSection::About),
@@ -2096,6 +2104,7 @@ impl SettingsView {
             SettingsPageViewHandle::AI(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::CloudEnvironments(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::MCPServers(v) => v.as_ref(app).should_render(app),
+            SettingsPageViewHandle::SshHosts(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Code(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::WarpDrive(v) => v.as_ref(app).should_render(app),
         }

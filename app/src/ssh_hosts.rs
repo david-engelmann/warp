@@ -37,14 +37,12 @@ use watcher::{BulkFilesystemWatcher, BulkFilesystemWatcherEvent};
 const SSH_HOSTS_WATCHER_DEBOUNCE_MILLI_SECS: u64 = 500;
 
 /// Events [`SshHostsModel`] subscribers can listen for.
-//
-// `allow(dead_code)` covers the payload: nothing subscribes to the
-// model in this phase. Phase 1.3's settings UI is the first consumer.
-#[allow(dead_code)]
 pub enum SshHostsEvent {
     /// The parsed host list changed. Payload is the new full list,
-    /// alphabetically sorted by alias.
-    HostsUpdated(Vec<HostDetail>),
+    /// alphabetically sorted by alias. Subscribers that re-read via
+    /// [`SshHostsModel::hosts`] can ignore the payload; it's carried
+    /// here for callers that prefer not to chase the model handle.
+    HostsUpdated(#[allow(dead_code)] Vec<HostDetail>),
 }
 
 /// In-memory cache of the SSH hosts named in `~/.ssh/config`.
@@ -99,9 +97,6 @@ impl SshHostsModel {
 
     /// Snapshot of the current host list. Alphabetically sorted by
     /// alias; deduplicated on alias.
-    //
-    // First consumer lands in Phase 1.3 (settings UI).
-    #[allow(dead_code)]
     pub fn hosts(&self) -> &[HostDetail] {
         &self.hosts
     }

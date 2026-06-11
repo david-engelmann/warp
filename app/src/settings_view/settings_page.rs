@@ -117,6 +117,7 @@ pub enum SettingsPageViewHandle {
     CloudEnvironments(ViewHandle<EnvironmentsPageView>),
     BillingAndUsage(ViewHandle<BillingAndUsageDispatchView>),
     MCPServers(ViewHandle<MCPServersSettingsPageView>),
+    SshHosts(ViewHandle<super::ssh_hosts::SshHostsSettingsPageView>),
     WarpDrive(ViewHandle<WarpDriveSettingsPageView>),
 }
 
@@ -141,6 +142,7 @@ impl SettingsPageViewHandle {
             CloudEnvironments(view_handle) => ChildView::new(view_handle).finish(),
             BillingAndUsage(view_handle) => ChildView::new(view_handle).finish(),
             MCPServers(view_handle) => ChildView::new(view_handle).finish(),
+            SshHosts(view_handle) => ChildView::new(view_handle).finish(),
             WarpDrive(view_handle) => ChildView::new(view_handle).finish(),
         }
     }
