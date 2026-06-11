@@ -11,10 +11,11 @@
 //! live-refreshes via the model's `HostsUpdated` event whenever the
 //! parsed config changes on disk.
 
+use warp_core::ui::color::hex_color::coloru_from_hex_string;
 use warp_ssh_config::HostDetail;
 use warpui::elements::{
-    Container, CrossAxisAlignment, Element, Flex, Hoverable, MainAxisSize, MouseStateHandle,
-    ParentElement,
+    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Element, Flex, Hoverable,
+    MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius, Wrap,
 };
 use warpui::platform::Cursor;
 use warpui::ui_components::components::UiComponent;
@@ -27,12 +28,18 @@ use super::settings_page::{
 use super::SettingsSection;
 use crate::appearance::Appearance;
 use crate::ssh_hosts::{SshHostsEvent, SshHostsModel};
+use crate::ssh_hosts_metadata::{HostMetadata, SshHostsMetadataEvent, SshHostsMetadataModel};
 use crate::workspace::WorkspaceAction;
 
 const ROW_SPACING: f32 = 12.;
 const ROW_INTERIOR_SPACING: f32 = 2.;
 const DESCRIPTION_BOTTOM_MARGIN: f32 = 12.;
 const ROW_PADDING: f32 = 8.;
+const COLOR_SWATCH_SIZE: f32 = 10.;
+const CHIP_SPACING: f32 = 4.;
+const CHIP_HORIZONTAL_PADDING: f32 = 6.;
+const CHIP_VERTICAL_PADDING: f32 = 2.;
+const CHIP_ROW_TOP_MARGIN: f32 = 6.;
 
 pub struct SshHostsSettingsPageView {
     page: PageType<Self>,
@@ -51,6 +58,16 @@ impl SshHostsSettingsPageView {
             SshHostsEvent::HostsUpdated(new_hosts) => {
                 me.row_states
                     .resize_with(new_hosts.len(), MouseStateHandle::default);
+                ctx.notify();
+            }
+        });
+
+        // Re-render when host metadata changes (TOML edit, programmatic
+        // set/remove). No payload to thread through — the widget re-reads
+        // the singleton on each render.
+        let metadata = SshHostsMetadataModel::handle(ctx);
+        ctx.subscribe_to_model(&metadata, |_, _, event, ctx| match event {
+            SshHostsMetadataEvent::Updated => {
                 ctx.notify();
             }
         });
@@ -95,6 +112,7 @@ impl SettingsWidget for SshHostsWidget {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let hosts = SshHostsModel::as_ref(app).hosts();
+        let metadata = SshHostsMetadataModel::as_ref(app);
         let mut column = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
@@ -109,7 +127,8 @@ impl SettingsWidget for SshHostsWidget {
                 // out of sync with the host list (the resize fires on
                 // the next `HostsUpdated` after a config edit).
                 let mouse_state = view.row_states.get(idx).cloned().unwrap_or_default();
-                column.add_child(render_host_row(host, mouse_state, appearance));
+                let row_metadata = metadata.get(&host.alias);
+                column.add_child(render_host_row(host, row_metadata, mouse_state, appearance));
             }
         }
 
@@ -176,6 +195,7 @@ fn render_empty_state(appearance: &Appearance) -> Box<dyn Element> {
 
 fn render_host_row(
     host: &HostDetail,
+    metadata: Option<&HostMetadata>,
     mouse_state: MouseStateHandle,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
@@ -184,12 +204,43 @@ fn render_host_row(
 
     Hoverable::new(mouse_state, |_state| {
         let ui = appearance.ui_builder();
+
+        // Title row: optional color swatch + display name (falls back
+        // to the alias when no `display_name` override is set).
+        let label = metadata
+            .and_then(|m| m.display_name.as_deref())
+            .unwrap_or(host.alias.as_str())
+            .to_string();
+        let mut title_row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(CHIP_SPACING);
+        if let Some(swatch) = metadata
+            .and_then(|m| m.color.as_deref())
+            .and_then(|hex| render_color_swatch(hex, appearance))
+        {
+            title_row.add_child(swatch);
+        }
+        title_row.add_child(ui.span(label.clone()).build().finish());
+
         let mut row = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
             .with_spacing(ROW_INTERIOR_SPACING);
 
-        row.add_child(ui.span(host.alias.clone()).build().finish());
+        row.add_child(title_row.finish());
+
+        // When `display_name` overrides the alias, surface the alias
+        // separately so the user can still see what they'd type at the
+        // shell (and which key in `~/.ssh/config` this row corresponds
+        // to).
+        if metadata.and_then(|m| m.display_name.as_deref()).is_some() {
+            row.add_child(
+                ui.span(format!("alias: {}", host.alias))
+                    .with_soft_wrap()
+                    .build()
+                    .finish(),
+            );
+        }
 
         if let Some(target) = format_target(host) {
             row.add_child(ui.span(target).with_soft_wrap().build().finish());
@@ -213,6 +264,17 @@ fn render_host_row(
             );
         }
 
+        if let Some(notes) = metadata.and_then(|m| m.notes.as_deref()) {
+            row.add_child(ui.span(notes.to_string()).with_soft_wrap().build().finish());
+        }
+
+        if let Some(tags) = metadata
+            .map(|m| m.tags.as_slice())
+            .filter(|t| !t.is_empty())
+        {
+            row.add_child(render_tag_chips(tags, appearance));
+        }
+
         Container::new(row.finish())
             .with_padding_top(ROW_PADDING)
             .with_padding_bottom(ROW_PADDING)
@@ -233,6 +295,54 @@ fn render_host_row(
             "ssh {alias_for_dispatch}"
         )));
     })
+    .finish()
+}
+
+/// Render the per-host color accent. Returns `None` for unparseable
+/// hex strings so a typo in the TOML degrades to "no swatch" rather
+/// than crashing the page.
+fn render_color_swatch(hex: &str, appearance: &Appearance) -> Option<Box<dyn Element>> {
+    let color = coloru_from_hex_string(hex).ok()?;
+    let swatch = Container::new(Flex::column().finish())
+        .with_background(color)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            COLOR_SWATCH_SIZE / 2.,
+        )))
+        .with_border(Border::all(1.).with_border_fill(appearance.theme().outline()))
+        .finish();
+    Some(
+        ConstrainedBox::new(swatch)
+            .with_width(COLOR_SWATCH_SIZE)
+            .with_height(COLOR_SWATCH_SIZE)
+            .finish(),
+    )
+}
+
+/// Render the tag list as a wrap row of pill chips.
+fn render_tag_chips(tags: &[String], appearance: &Appearance) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let chips: Vec<Box<dyn Element>> = tags
+        .iter()
+        .map(|tag| {
+            Container::new(appearance.ui_builder().span(tag.clone()).build().finish())
+                .with_padding(
+                    Padding::uniform(CHIP_VERTICAL_PADDING)
+                        .with_left(CHIP_HORIZONTAL_PADDING)
+                        .with_right(CHIP_HORIZONTAL_PADDING),
+                )
+                .with_background(theme.surface_2())
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+                .with_border(Border::all(1.).with_border_fill(theme.outline()))
+                .finish()
+        })
+        .collect();
+    Container::new(
+        Wrap::row()
+            .with_run_spacing(CHIP_SPACING)
+            .with_children(chips)
+            .finish(),
+    )
+    .with_margin_top(CHIP_ROW_TOP_MARGIN)
     .finish()
 }
 

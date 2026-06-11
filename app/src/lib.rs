@@ -75,6 +75,7 @@ mod server;
 mod session_management;
 mod shell_indicator;
 mod ssh_hosts;
+mod ssh_hosts_metadata;
 mod suggestions;
 mod system;
 mod tab;
@@ -293,6 +294,7 @@ use crate::settings::{AISettings, AccessibilitySettings, ScrollSettings, Selecti
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::settings_view::DisplayCount;
 use crate::ssh_hosts::SshHostsModel;
+use crate::ssh_hosts_metadata::SshHostsMetadataModel;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
@@ -1126,6 +1128,9 @@ pub(crate) fn initialize_app(
     ensure_warp_watch_roots_exist();
     ctx.add_singleton_model(WarpManagedPathsWatcher::new);
     ctx.add_singleton_model(SshHostsModel::new);
+    // Registered AFTER SshHostsModel so the prune-on-config-change
+    // subscription has a model to listen to.
+    ctx.add_singleton_model(SshHostsMetadataModel::new);
 
     ctx.add_singleton_model(WarpConfig::new);
     ctx.add_singleton_model(|_ctx| SettingsManager::default());

@@ -74,6 +74,14 @@ pub fn warp_home_mcp_config_file_path() -> Option<PathBuf> {
     warp_home_config_dir().map(|warp_config_dir| warp_config_dir.join(".mcp.json"))
 }
 
+/// Returns the path to the user's SSH host metadata file
+/// (`~/.warp[*]/ssh_hosts_metadata.toml`). Stores per-host metadata
+/// (display name, notes, tags, color) Warp owns separately from the
+/// user's `~/.ssh/config`. Surfaces #442 host management.
+pub fn warp_home_ssh_hosts_metadata_file_path() -> Option<PathBuf> {
+    warp_home_config_dir().map(|warp_config_dir| warp_config_dir.join("ssh_hosts_metadata.toml"))
+}
+
 /// Returns the macOS config directory name for the current channel.
 ///
 /// Stable uses `.warp`, while other channels include a channel suffix
