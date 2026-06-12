@@ -15470,7 +15470,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.17",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -15478,6 +15478,17 @@ name = "warp_ssh_config"
 version = "0.1.0"
 dependencies = [
  "glob",
+ "log",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "warp_ssh_diagnostics"
+version = "0.1.0"
+dependencies = [
+ "command",
+ "instant",
  "log",
  "serde",
  "tempfile",
