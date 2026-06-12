@@ -50,6 +50,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+mod managed;
+pub use managed::{
+    ManagedSession, SessionError, SessionLifecycle, DEFAULT_REATTACH_WINDOW_MS,
+};
+
 /// Default ring capacity. Sized to hold roughly ten typical agent
 /// turns of streaming output (each turn ≈ 50-100 events). Override
 /// via [`EventJournal::with_capacity`] if profiling shows the right
