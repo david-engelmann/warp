@@ -15291,6 +15291,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "warp_ssh_diagnostics"
+version = "0.1.0"
+dependencies = [
+ "command",
+ "instant",
+ "log",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "warp_terminal"
 version = "0.0.0"
 dependencies = [
