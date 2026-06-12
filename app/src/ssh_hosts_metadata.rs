@@ -7,10 +7,14 @@
 //! `~/.warp/ssh_hosts_metadata.toml` ([`warp_core::paths::warp_home_ssh_hosts_metadata_file_path`])
 //! and reloaded on startup.
 //!
-//! Schema designed for forward-compat with Phase 1.6 cloud sync: each
-//! `HostMetadata` is a plain `Serialize`/`Deserialize` struct that can
-//! be wrapped in a `cloud_object` model later without any change to
-//! the on-disk layout.
+//! Cross-device sync (Phase 1.6) is offered as `export_to_path` /
+//! `import_from_path` — users move the TOML between machines via their
+//! own tool of choice (Dropbox, iCloud, syncthing, git, scp). Server-
+//! backed Warp Drive sync was scoped out because adding a new
+//! `JsonObjectType` requires a coordinated server schema change; the
+//! `HostMetadata` struct stays a plain `Serialize`/`Deserialize` so
+//! a future PR can wrap it in a `cloud_object` model without any
+//! on-disk layout churn.
 
 use std::collections::HashMap;
 #[cfg(not(target_family = "wasm"))]
@@ -52,10 +56,6 @@ impl HostMetadata {
     /// `true` when no fields are set. Used to garbage-collect the
     /// on-disk map: empty records are removed rather than persisted
     /// as `{}`.
-    //
-    // First consumer is the Phase 1.5b modal editor; squelch the
-    // dead-code warning until that lands.
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.display_name.is_none()
             && self.notes.is_none()
@@ -80,6 +80,33 @@ pub enum SshHostsMetadataEvent {
     /// snapshot — no diff payload is carried because UI consumers
     /// generally re-render the full list anyway.
     Updated,
+}
+
+/// Counters returned from [`SshHostsMetadataModel::import_from_path`]
+/// so the UI can render a meaningful toast (e.g. "Imported 3 new, 2
+/// overwritten, 4 unchanged").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportResult {
+    /// Aliases that didn't have any prior record.
+    pub imported_new: usize,
+    /// Aliases whose record differed from the existing one and were
+    /// overwritten by the imported value (imported-wins policy).
+    pub overwritten: usize,
+    /// Aliases whose imported record matched the existing record
+    /// exactly — no-op, no write.
+    pub unchanged: usize,
+}
+
+impl ImportResult {
+    /// Total records read from the imported file.
+    pub fn total(&self) -> usize {
+        self.imported_new + self.overwritten + self.unchanged
+    }
+
+    /// `true` when at least one record was added or modified.
+    pub fn touched_disk(&self) -> bool {
+        self.imported_new + self.overwritten > 0
+    }
 }
 
 /// In-memory cache of per-host metadata. Singleton, registered at
@@ -146,10 +173,6 @@ impl SshHostsMetadataModel {
 
     /// Set the metadata for `alias`. An empty record is treated as
     /// "remove" so the on-disk store stays compact.
-    //
-    // First consumer is the Phase 1.5b modal editor; squelch the
-    // dead-code warning until that lands.
-    #[allow(dead_code)]
     pub fn set(&mut self, alias: String, metadata: HostMetadata, ctx: &mut ModelContext<Self>) {
         let changed = if metadata.is_empty() {
             self.by_alias.remove(&alias).is_some()
@@ -161,6 +184,57 @@ impl SshHostsMetadataModel {
             self.persist();
             ctx.emit(SshHostsMetadataEvent::Updated);
         }
+    }
+
+    /// Serialize the current metadata map to a TOML file at `path`.
+    /// Returns the byte count written on success. Used by Phase 1.6
+    /// "Export…" so users can sync metadata across machines via their
+    /// own file-sync tool of choice (Dropbox, iCloud Drive, syncthing,
+    /// git, scp). Does not mutate in-memory state.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn export_to_path(&self, path: &Path) -> Result<usize, String> {
+        let file = MetadataFile {
+            hosts: self.by_alias.clone(),
+        };
+        let serialized = toml::to_string_pretty(&file)
+            .map_err(|e| format!("Failed to serialize metadata: {e}"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create parent directory {}: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+        let bytes = serialized.len();
+        std::fs::write(path, serialized)
+            .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+        Ok(bytes)
+    }
+
+    /// Read a TOML file at `path`, merge into the current metadata
+    /// map (imported entries overwrite existing ones for the same
+    /// alias — imported-wins last-write semantics), persist, and emit
+    /// `Updated` if anything changed.
+    ///
+    /// Counts breakdown surfaces in the toast via [`ImportResult`].
+    #[cfg(not(target_family = "wasm"))]
+    pub fn import_from_path(
+        &mut self,
+        path: &Path,
+        ctx: &mut ModelContext<Self>,
+    ) -> Result<ImportResult, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        let parsed: MetadataFile = toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse {} as TOML: {e}", path.display()))?;
+
+        let result = merge_imported(&mut self.by_alias, parsed.hosts);
+        if result.touched_disk() {
+            self.persist();
+            ctx.emit(SshHostsMetadataEvent::Updated);
+        }
+        Ok(result)
     }
 
     /// Drop any metadata record whose alias no longer appears in
@@ -216,6 +290,32 @@ impl Entity for SshHostsMetadataModel {
 }
 
 impl SingletonEntity for SshHostsMetadataModel {}
+
+/// Merge `imported` into `current` using imported-wins semantics, and
+/// report counts. Pure function so unit tests can drive it directly
+/// without needing a `ModelContext`.
+fn merge_imported(
+    current: &mut HashMap<String, HostMetadata>,
+    imported: HashMap<String, HostMetadata>,
+) -> ImportResult {
+    let mut result = ImportResult::default();
+    for (alias, metadata) in imported {
+        match current.get(&alias) {
+            Some(existing) if existing == &metadata => {
+                result.unchanged += 1;
+            }
+            Some(_) => {
+                current.insert(alias, metadata);
+                result.overwritten += 1;
+            }
+            None => {
+                current.insert(alias, metadata);
+                result.imported_new += 1;
+            }
+        }
+    }
+    result
+}
 
 #[cfg(not(target_family = "wasm"))]
 fn load_from_path(path: &Path) -> HashMap<String, HostMetadata> {

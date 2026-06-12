@@ -14,9 +14,17 @@
 //! - Phase 1.5b (metadata editor): each row carries an "Edit" button;
 //!   clicking it opens [`super::ssh_hosts_metadata_edit_dialog::SshHostsMetadataEditDialog`],
 //!   which writes back through the model on Save.
+//! - Phase 1.6 (local-only cross-device sync): "Export…" / "Import…"
+//!   buttons at the top of the page write/read the full metadata
+//!   store as a portable TOML file. Users sync via their own tool of
+//!   choice (Dropbox, iCloud Drive, syncthing, git, scp). Server-side
+//!   Warp Drive sync is out of scope here because adding a new
+//!   `JsonObjectType` requires a coordinated server schema change.
 //!
 //! The page live-refreshes via the model's `HostsUpdated` and
 //! `Updated` events whenever the underlying state changes on disk.
+
+use std::path::PathBuf;
 
 use warp_core::ui::color::hex_color::coloru_from_hex_string;
 use warp_ssh_config::HostDetail;
@@ -25,7 +33,7 @@ use warpui::elements::{
     Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius,
     Wrap,
 };
-use warpui::platform::Cursor;
+use warpui::platform::{Cursor, FilePickerConfiguration, SaveFilePickerConfiguration};
 use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle};
 
@@ -39,8 +47,12 @@ use super::ssh_hosts_metadata_edit_dialog::{
 use super::SettingsSection;
 use crate::appearance::Appearance;
 use crate::ssh_hosts::{SshHostsEvent, SshHostsModel};
-use crate::ssh_hosts_metadata::{HostMetadata, SshHostsMetadataEvent, SshHostsMetadataModel};
+use crate::ssh_hosts_metadata::{
+    HostMetadata, ImportResult, SshHostsMetadataEvent, SshHostsMetadataModel,
+};
+use crate::view_components::DismissibleToast;
 use crate::workspace::WorkspaceAction;
+use crate::ToastStack;
 
 const ROW_SPACING: f32 = 12.;
 const ROW_INTERIOR_SPACING: f32 = 2.;
@@ -52,6 +64,9 @@ const CHIP_HORIZONTAL_PADDING: f32 = 6.;
 const CHIP_VERTICAL_PADDING: f32 = 2.;
 const CHIP_ROW_TOP_MARGIN: f32 = 6.;
 const EDIT_BUTTON_PADDING: f32 = 6.;
+const EXPORT_DEFAULT_FILENAME: &str = "ssh_hosts_metadata.toml";
+const ACTIONS_ROW_BOTTOM_MARGIN: f32 = 12.;
+const ACTIONS_ROW_SPACING: f32 = 8.;
 
 /// Page-level actions routed via [`TypedActionView`]. Edit buttons in
 /// each host row dispatch [`SshHostsSettingsPageAction::OpenMetadataEditor`]
@@ -63,6 +78,12 @@ pub enum SshHostsSettingsPageAction {
     /// Open the metadata edit dialog for the given alias, pre-filled
     /// with the current record (or empty fields when no record exists).
     OpenMetadataEditor(String),
+    /// Phase 1.6 — open a native save dialog and write the full
+    /// metadata store to the chosen path.
+    ExportMetadata,
+    /// Phase 1.6 — open a native file dialog and merge a previously
+    /// exported metadata TOML into the current store.
+    ImportMetadata,
 }
 
 pub struct SshHostsSettingsPageView {
@@ -76,6 +97,10 @@ pub struct SshHostsSettingsPageView {
     /// The metadata edit dialog, rendered into the modal slot when
     /// [`SshHostsMetadataEditDialog::is_visible`] is true.
     metadata_edit_dialog: ViewHandle<SshHostsMetadataEditDialog>,
+    /// Mouse-state for the page-level "Export…" button (Phase 1.6).
+    export_button_state: MouseStateHandle,
+    /// Mouse-state for the page-level "Import…" button (Phase 1.6).
+    import_button_state: MouseStateHandle,
 }
 
 impl SshHostsSettingsPageView {
@@ -117,6 +142,8 @@ impl SshHostsSettingsPageView {
             row_states,
             edit_button_states,
             metadata_edit_dialog,
+            export_button_state: MouseStateHandle::default(),
+            import_button_state: MouseStateHandle::default(),
         }
     }
 
@@ -166,6 +193,39 @@ impl TypedActionView for SshHostsSettingsPageView {
                     d.show(alias, current.as_ref(), ctx);
                 });
             }
+            SshHostsSettingsPageAction::ExportMetadata => {
+                let mut config = SaveFilePickerConfiguration::new()
+                    .with_default_filename(EXPORT_DEFAULT_FILENAME.to_string());
+                if let Some(home) = dirs::home_dir() {
+                    config = config.with_default_directory(home);
+                }
+                ctx.open_save_file_picker(
+                    |path_opt, _view, ctx| {
+                        let Some(path_str) = path_opt else { return };
+                        let path = PathBuf::from(path_str);
+                        let result = SshHostsMetadataModel::as_ref(ctx).export_to_path(&path);
+                        emit_export_toast(&path, result, ctx);
+                    },
+                    config,
+                );
+            }
+            SshHostsSettingsPageAction::ImportMetadata => {
+                let config = FilePickerConfiguration::new();
+                ctx.open_file_picker(
+                    |result, ctx| {
+                        let Ok(paths) = result else { return };
+                        let Some(path_str) = paths.into_iter().next() else {
+                            return;
+                        };
+                        let path = PathBuf::from(path_str);
+                        let model_handle = SshHostsMetadataModel::handle(ctx);
+                        let outcome = model_handle
+                            .update(ctx, |model, ctx| model.import_from_path(&path, ctx));
+                        emit_import_toast(&path, outcome, ctx);
+                    },
+                    config,
+                );
+            }
         }
     }
 }
@@ -206,6 +266,11 @@ impl SettingsWidget for SshHostsWidget {
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
         column.add_child(render_description(appearance));
+        column.add_child(render_actions_row(
+            view.export_button_state.clone(),
+            view.import_button_state.clone(),
+            appearance,
+        ));
 
         if hosts.is_empty() {
             column.add_child(render_empty_state(appearance));
@@ -410,6 +475,109 @@ fn render_host_row(
     )
     .with_margin_bottom(ROW_SPACING - ROW_PADDING)
     .finish()
+}
+
+fn render_actions_row(
+    export_state: MouseStateHandle,
+    import_state: MouseStateHandle,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    Container::new(
+        Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(ACTIONS_ROW_SPACING)
+            .with_child(render_action_button(
+                "Export\u{2026}",
+                export_state,
+                appearance,
+                SshHostsSettingsPageAction::ExportMetadata,
+            ))
+            .with_child(render_action_button(
+                "Import\u{2026}",
+                import_state,
+                appearance,
+                SshHostsSettingsPageAction::ImportMetadata,
+            ))
+            .finish(),
+    )
+    .with_margin_bottom(ACTIONS_ROW_BOTTOM_MARGIN)
+    .finish()
+}
+
+/// Page-level naked-style button rendered for the Export / Import
+/// row. Identical visual treatment to the per-row edit button so the
+/// chrome stays consistent.
+fn render_action_button(
+    label: &str,
+    mouse_state: MouseStateHandle,
+    appearance: &Appearance,
+    action: SshHostsSettingsPageAction,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let surface_2 = theme.surface_2();
+    let outline = theme.outline();
+    let label = label.to_string();
+    Hoverable::new(mouse_state, |_state| {
+        Container::new(appearance.ui_builder().span(label).build().finish())
+            .with_padding(Padding::uniform(EDIT_BUTTON_PADDING))
+            .with_background(surface_2)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+            .with_border(Border::all(1.).with_border_fill(outline))
+            .finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(action.clone());
+    })
+    .finish()
+}
+
+fn emit_export_toast(
+    path: &std::path::Path,
+    result: Result<usize, String>,
+    ctx: &mut ViewContext<SshHostsSettingsPageView>,
+) {
+    let window_id = ctx.window_id();
+    let toast = match result {
+        Ok(bytes) => DismissibleToast::success(format!(
+            "Exported SSH host metadata to {} ({bytes} bytes).",
+            path.display()
+        )),
+        Err(err) => DismissibleToast::error(format!("Export failed: {err}")),
+    };
+    ToastStack::handle(ctx).update(ctx, |stack, ctx| {
+        stack.add_ephemeral_toast(toast, window_id, ctx);
+    });
+}
+
+fn emit_import_toast(
+    path: &std::path::Path,
+    result: Result<ImportResult, String>,
+    ctx: &mut ViewContext<SshHostsSettingsPageView>,
+) {
+    let window_id = ctx.window_id();
+    let toast = match result {
+        Ok(import) => {
+            if import.total() == 0 {
+                DismissibleToast::success(format!(
+                    "Imported from {}: no host records found.",
+                    path.display()
+                ))
+            } else {
+                DismissibleToast::success(format!(
+                    "Imported from {}: {} new, {} overwritten, {} unchanged.",
+                    path.display(),
+                    import.imported_new,
+                    import.overwritten,
+                    import.unchanged
+                ))
+            }
+        }
+        Err(err) => DismissibleToast::error(format!("Import failed: {err}")),
+    };
+    ToastStack::handle(ctx).update(ctx, |stack, ctx| {
+        stack.add_ephemeral_toast(toast, window_id, ctx);
+    });
 }
 
 /// "Edit" button rendered next to each host row. Dispatches a

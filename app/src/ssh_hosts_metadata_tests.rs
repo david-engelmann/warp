@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{load_from_path, HostMetadata, MetadataFile};
+use super::{load_from_path, merge_imported, HostMetadata, ImportResult, MetadataFile};
 
 #[test]
 fn host_metadata_default_is_empty() {
@@ -143,4 +143,148 @@ tags = ["staging"]
     assert_eq!(result.len(), 2);
 
     let _ = std::fs::remove_file(&path);
+}
+
+// ── merge_imported (Phase 1.6) ──────────────────────────────────────
+
+fn metadata_with_display(name: &str) -> HostMetadata {
+    HostMetadata {
+        display_name: Some(name.to_string()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn merge_into_empty_current_classifies_every_record_as_new() {
+    let mut current = HashMap::new();
+    let mut imported = HashMap::new();
+    imported.insert("prod-web".to_string(), metadata_with_display("Prod web"));
+    imported.insert("staging".to_string(), metadata_with_display("Staging"));
+
+    let result = merge_imported(&mut current, imported);
+
+    assert_eq!(result.imported_new, 2);
+    assert_eq!(result.overwritten, 0);
+    assert_eq!(result.unchanged, 0);
+    assert_eq!(current.len(), 2);
+}
+
+#[test]
+fn merge_overwrites_when_imported_differs_from_existing() {
+    let mut current = HashMap::new();
+    current.insert("prod-web".to_string(), metadata_with_display("Old name"));
+    let mut imported = HashMap::new();
+    imported.insert("prod-web".to_string(), metadata_with_display("New name"));
+
+    let result = merge_imported(&mut current, imported);
+
+    assert_eq!(result.imported_new, 0);
+    assert_eq!(result.overwritten, 1);
+    assert_eq!(result.unchanged, 0);
+    assert_eq!(
+        current
+            .get("prod-web")
+            .and_then(|m| m.display_name.as_deref()),
+        Some("New name"),
+    );
+}
+
+#[test]
+fn merge_classifies_matching_records_as_unchanged() {
+    let mut current = HashMap::new();
+    current.insert("prod-web".to_string(), metadata_with_display("Prod web"));
+    let mut imported = HashMap::new();
+    imported.insert("prod-web".to_string(), metadata_with_display("Prod web"));
+
+    let result = merge_imported(&mut current, imported);
+
+    assert_eq!(result.imported_new, 0);
+    assert_eq!(result.overwritten, 0);
+    assert_eq!(result.unchanged, 1);
+}
+
+#[test]
+fn merge_with_mixed_outcomes_reports_all_counts_correctly() {
+    let mut current = HashMap::new();
+    current.insert("prod-web".to_string(), metadata_with_display("Prod web"));
+    current.insert("staging".to_string(), metadata_with_display("Staging"));
+
+    let mut imported = HashMap::new();
+    // staging: same → unchanged
+    imported.insert("staging".to_string(), metadata_with_display("Staging"));
+    // prod-web: differs → overwritten
+    imported.insert("prod-web".to_string(), metadata_with_display("Prod-web v2"));
+    // dev: new → imported_new
+    imported.insert("dev".to_string(), metadata_with_display("Dev"));
+
+    let result = merge_imported(&mut current, imported);
+
+    assert_eq!(result.imported_new, 1);
+    assert_eq!(result.overwritten, 1);
+    assert_eq!(result.unchanged, 1);
+    assert_eq!(result.total(), 3);
+    assert!(result.touched_disk());
+    assert_eq!(current.len(), 3);
+}
+
+#[test]
+fn merge_with_no_changes_does_not_touch_disk() {
+    let mut current = HashMap::new();
+    current.insert("prod-web".to_string(), metadata_with_display("Prod web"));
+    let mut imported = HashMap::new();
+    imported.insert("prod-web".to_string(), metadata_with_display("Prod web"));
+
+    let result = merge_imported(&mut current, imported);
+
+    assert!(!result.touched_disk());
+}
+
+#[test]
+fn merge_preserves_existing_aliases_not_present_in_import() {
+    // Import is additive — existing aliases that aren't in the
+    // imported file are NOT removed. Removal happens only via the
+    // prune-on-config-change subscription.
+    let mut current = HashMap::new();
+    current.insert("prod-web".to_string(), metadata_with_display("Prod web"));
+    current.insert("staging".to_string(), metadata_with_display("Staging"));
+
+    let mut imported = HashMap::new();
+    imported.insert("dev".to_string(), metadata_with_display("Dev"));
+
+    let _ = merge_imported(&mut current, imported);
+
+    assert_eq!(current.len(), 3);
+    assert!(current.contains_key("prod-web"));
+    assert!(current.contains_key("staging"));
+    assert!(current.contains_key("dev"));
+}
+
+#[test]
+fn import_result_total_sums_all_three_counts() {
+    let r = ImportResult {
+        imported_new: 1,
+        overwritten: 2,
+        unchanged: 3,
+    };
+    assert_eq!(r.total(), 6);
+}
+
+#[test]
+fn import_result_touched_disk_excludes_unchanged() {
+    assert!(!ImportResult::default().touched_disk());
+    assert!(!ImportResult {
+        unchanged: 5,
+        ..Default::default()
+    }
+    .touched_disk());
+    assert!(ImportResult {
+        imported_new: 1,
+        ..Default::default()
+    }
+    .touched_disk());
+    assert!(ImportResult {
+        overwritten: 1,
+        ..Default::default()
+    }
+    .touched_disk());
 }
