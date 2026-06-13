@@ -197,8 +197,7 @@ fn disk_replay_recovers_appended_entries() {
         journal.append(payload("c"));
     }
 
-    let recovered: Vec<JournalEntry<Value>> =
-        read_journal_entries(&path).expect("read journal");
+    let recovered: Vec<JournalEntry<Value>> = read_journal_entries(&path).expect("read journal");
     assert_eq!(recovered.len(), 3);
     let seqs: Vec<u64> = recovered.iter().map(|e| e.seq).collect();
     assert_eq!(seqs, vec![1, 2, 3]);
@@ -220,8 +219,7 @@ fn disk_replay_skips_malformed_lines_silently() {
     )
     .expect("write");
 
-    let recovered: Vec<JournalEntry<Value>> =
-        read_journal_entries(&path).expect("read");
+    let recovered: Vec<JournalEntry<Value>> = read_journal_entries(&path).expect("read");
     assert_eq!(recovered.len(), 2);
 }
 
@@ -231,8 +229,7 @@ fn disk_replay_treats_empty_lines_as_skipped() {
     let path = tmp.path().join("journal.jsonl");
     std::fs::write(&path, "\n\n\n").expect("write");
 
-    let recovered: Vec<JournalEntry<Value>> =
-        read_journal_entries(&path).expect("read");
+    let recovered: Vec<JournalEntry<Value>> = read_journal_entries(&path).expect("read");
     assert!(recovered.is_empty());
 }
 
@@ -254,8 +251,7 @@ fn append_to_preserves_existing_file_contents() {
         journal.append(payload("b"));
     }
 
-    let recovered: Vec<JournalEntry<Value>> =
-        read_journal_entries(&path).expect("read");
+    let recovered: Vec<JournalEntry<Value>> = read_journal_entries(&path).expect("read");
     assert_eq!(recovered.len(), 2);
     let labels: Vec<String> = recovered
         .iter()
