@@ -159,10 +159,7 @@ impl<P> ManagedSession<P> {
         if let SessionLifecycle::Disconnected { since_ms } = self.lifecycle {
             if now_ms.saturating_sub(since_ms) >= self.reattach_window_ms {
                 self.lifecycle = SessionLifecycle::Dead {
-                    reason: format!(
-                        "reattach window of {}ms elapsed",
-                        self.reattach_window_ms
-                    ),
+                    reason: format!("reattach window of {}ms elapsed", self.reattach_window_ms),
                 };
             }
         }

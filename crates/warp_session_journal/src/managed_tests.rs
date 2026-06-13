@@ -21,17 +21,11 @@ fn lifecycle_predicate_helpers() {
     assert!(SessionLifecycle::Active.is_appendable());
     assert!(SessionLifecycle::Reattached.is_appendable());
     assert!(!SessionLifecycle::Disconnected { since_ms: 0 }.is_appendable());
-    assert!(!SessionLifecycle::Dead {
-        reason: "x".into()
-    }
-    .is_appendable());
+    assert!(!SessionLifecycle::Dead { reason: "x".into() }.is_appendable());
 
     assert!(!SessionLifecycle::Active.is_dead());
     assert!(!SessionLifecycle::Disconnected { since_ms: 0 }.is_dead());
-    assert!(SessionLifecycle::Dead {
-        reason: "x".into()
-    }
-    .is_dead());
+    assert!(SessionLifecycle::Dead { reason: "x".into() }.is_dead());
 }
 
 // ── append gating ───────────────────────────────────────────────────
