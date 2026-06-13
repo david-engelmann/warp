@@ -53,6 +53,7 @@ use crate::ssh_hosts_metadata::{
 use crate::view_components::DismissibleToast;
 use crate::workspace::WorkspaceAction;
 use crate::ToastStack;
+use warp_ssh_diagnostics::{list_ssh_identities, ssh_agent_status, SshAgentStatus, SshIdentity};
 
 const ROW_SPACING: f32 = 12.;
 const ROW_INTERIOR_SPACING: f32 = 2.;
@@ -84,6 +85,12 @@ pub enum SshHostsSettingsPageAction {
     /// Phase 1.6 — open a native file dialog and merge a previously
     /// exported metadata TOML into the current store.
     ImportMetadata,
+    /// R3.5 — re-probe `ssh-agent` + re-scan `~/.ssh` for visible
+    /// identity files. The `ssh-add -l` subprocess is too expensive
+    /// to run on every render so the diagnostics row caches the
+    /// result and the user (or an internal refresh trigger) drives
+    /// re-probing via this action.
+    RefreshDiagnostics,
 }
 
 pub struct SshHostsSettingsPageView {
@@ -101,6 +108,17 @@ pub struct SshHostsSettingsPageView {
     export_button_state: MouseStateHandle,
     /// Mouse-state for the page-level "Import…" button (Phase 1.6).
     import_button_state: MouseStateHandle,
+    /// Mouse-state for the diagnostics-refresh button (R3.5).
+    refresh_diagnostics_button_state: MouseStateHandle,
+    /// Cached `ssh-agent` probe result. Refreshed on demand via the
+    /// chip's button rather than on every render — `ssh-add -l`
+    /// spawns a subprocess (~50ms typical, ~750ms worst case) which
+    /// would stall the page's settings-tab search reflow.
+    agent_status: SshAgentStatus,
+    /// Cached identity-file list. Cheap (filesystem stat) but
+    /// cached alongside `agent_status` for symmetric refresh
+    /// semantics.
+    identities: Vec<SshIdentity>,
 }
 
 impl SshHostsSettingsPageView {
@@ -144,6 +162,9 @@ impl SshHostsSettingsPageView {
             metadata_edit_dialog,
             export_button_state: MouseStateHandle::default(),
             import_button_state: MouseStateHandle::default(),
+            refresh_diagnostics_button_state: MouseStateHandle::default(),
+            agent_status: ssh_agent_status(),
+            identities: list_ssh_identities(),
         }
     }
 
@@ -226,6 +247,11 @@ impl TypedActionView for SshHostsSettingsPageView {
                     config,
                 );
             }
+            SshHostsSettingsPageAction::RefreshDiagnostics => {
+                self.agent_status = ssh_agent_status();
+                self.identities = list_ssh_identities();
+                ctx.notify();
+            }
         }
     }
 }
@@ -266,6 +292,12 @@ impl SettingsWidget for SshHostsWidget {
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
         column.add_child(render_description(appearance));
+        column.add_child(render_diagnostics_row(
+            &view.agent_status,
+            &view.identities,
+            view.refresh_diagnostics_button_state.clone(),
+            appearance,
+        ));
         column.add_child(render_actions_row(
             view.export_button_state.clone(),
             view.import_button_state.clone(),
@@ -474,6 +506,74 @@ fn render_host_row(
             .finish(),
     )
     .with_margin_bottom(ROW_SPACING - ROW_PADDING)
+    .finish()
+}
+
+/// R3.5 — diagnostics row at the top of the page. Renders three
+/// pill-style chips with the current `ssh-agent` health, the count
+/// of visible identity files in `~/.ssh`, and a refresh button. The
+/// chips' values come from cached probes on the view; the
+/// [`SshHostsSettingsPageAction::RefreshDiagnostics`] action
+/// re-runs the probes.
+fn render_diagnostics_row(
+    agent_status: &SshAgentStatus,
+    identities: &[SshIdentity],
+    refresh_state: MouseStateHandle,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let agent_label = match agent_status {
+        SshAgentStatus::Available { keys_loaded, .. } => {
+            if *keys_loaded == 1 {
+                "Agent: 1 key loaded".to_string()
+            } else {
+                format!("Agent: {keys_loaded} keys loaded")
+            }
+        }
+        SshAgentStatus::NotConfigured => "Agent: not configured".to_string(),
+        SshAgentStatus::Stale { .. } => "Agent: stale socket".to_string(),
+    };
+
+    let with_private = identities.iter().filter(|i| i.has_private_key).count();
+    let total = identities.len();
+    let identities_label = match (total, with_private) {
+        (0, _) => "Keys in ~/.ssh: none visible".to_string(),
+        (n, p) if n == p => format!("Keys in ~/.ssh: {n}"),
+        (n, p) => format!("Keys in ~/.ssh: {n} ({} private-key-only)", n - p),
+    };
+
+    Container::new(
+        Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(ACTIONS_ROW_SPACING)
+            .with_child(render_diagnostics_chip(&agent_label, appearance))
+            .with_child(render_diagnostics_chip(&identities_label, appearance))
+            .with_child(render_action_button(
+                "Refresh",
+                refresh_state,
+                appearance,
+                SshHostsSettingsPageAction::RefreshDiagnostics,
+            ))
+            .finish(),
+    )
+    .with_margin_bottom(ACTIONS_ROW_BOTTOM_MARGIN)
+    .finish()
+}
+
+/// Static text chip with the same visual treatment as the Edit /
+/// Export / Import buttons but without click semantics.
+fn render_diagnostics_chip(label: &str, appearance: &Appearance) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    Container::new(
+        appearance
+            .ui_builder()
+            .span(label.to_string())
+            .build()
+            .finish(),
+    )
+    .with_padding(Padding::uniform(EDIT_BUTTON_PADDING))
+    .with_background(theme.surface_2())
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+    .with_border(Border::all(1.).with_border_fill(theme.outline()))
     .finish()
 }
 
