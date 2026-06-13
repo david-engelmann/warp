@@ -51,8 +51,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 mod managed;
-pub use managed::{
-    ManagedSession, SessionError, SessionLifecycle, DEFAULT_REATTACH_WINDOW_MS,
+mod reconnect;
+pub use managed::{ManagedSession, SessionError, SessionLifecycle, DEFAULT_REATTACH_WINDOW_MS};
+pub use reconnect::{
+    BackoffState, CrashLoopConfig, CrashLoopDetector, ReconnectConfig, ReconnectDecision,
+    ReconnectPolicy, DEFAULT_BACKOFF_MULTIPLIER, DEFAULT_CRASH_LOOP_THRESHOLD,
+    DEFAULT_CRASH_LOOP_WINDOW_MS, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS,
 };
 
 /// Default ring capacity. Sized to hold roughly ten typical agent
@@ -275,10 +279,7 @@ impl<P: Serialize> JournalDiskWriter<P> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             writer: BufWriter::new(file),
             path,
